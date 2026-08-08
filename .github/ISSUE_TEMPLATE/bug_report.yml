@@ -1,0 +1,148 @@
+name: 🐛 Bug 报告
+description: 报告 PixKeep 中的问题或异常行为
+title: "[Bug] "
+labels: ["bug", "需要分类"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢你花时间填写 Bug 报告！🙏
+
+        在提交之前，请确保：
+        - ✅ 已搜索现有 Issues，确认这不是重复报告
+        - ✅ 尽量使用最新版本的 PixKeep
+        - ✅ 截图或日志中不包含密码、隐私和其他敏感信息
+
+  - type: input
+    id: version
+    attributes:
+      label: 软件版本
+      description: 你正在使用的 PixKeep 版本号
+      placeholder: 例如：v0.1.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统
+      description: 你使用的 Windows 版本
+      options:
+        - Windows 11
+        - Windows 10
+        - Windows 其他版本
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-type
+    attributes:
+      label: 安装方式
+      description: 你使用的 PixKeep 安装方式
+      options:
+        - 安装包
+        - 便携版
+        - 其他或不确定
+    validations:
+      required: true
+
+  - type: dropdown
+    id: context
+    attributes:
+      label: 问题场景
+      description: 选择最接近问题发生位置的功能
+      options:
+        - 截图
+        - 标注或编辑
+        - OCR 识别
+        - 长截屏
+        - 贴图或贴图分组
+        - 历史图片
+        - 输出或剪贴板
+        - 快捷键
+        - 主题或设置
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: bug-description
+    attributes:
+      label: 问题描述
+      description: 清晰简洁地描述遇到的问题
+      placeholder: 告诉我们发生了什么……
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps-to-reproduce
+    attributes:
+      label: 复现步骤
+      description: 如何重现这个问题？
+      placeholder: |
+        1. 打开 PixKeep
+        2. 执行……
+        3. 看到……
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: 期望行为
+      description: 描述你期望发生的正常行为
+      placeholder: 本应该……
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual-behavior
+    attributes:
+      label: 实际行为
+      description: 描述实际发生的行为，以及是否可以继续使用
+      placeholder: 但实际上……
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: 环境信息
+      description: 如果与问题相关，请补充显示器数量、缩放比例、分辨率或其他硬件信息
+      placeholder: 例如：双显示器，主屏 150% 缩放，副屏 100% 缩放
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: 截图或录屏
+      description: 如果适用，拖拽截图或录屏到这里帮助说明问题
+      placeholder: 请确认图片中不包含敏感信息
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志
+      description: 如果有错误日志或崩溃信息，请粘贴在这里
+      render: shell
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: 补充信息
+      description: 添加其他与问题相关的信息
+      placeholder: 例如：问题出现频率、最近是否更新过版本等
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: 检查清单
+      description: 请确认以下内容
+      options:
+        - label: 我已经搜索过现有的 Issues
+          required: true
+        - label: 我已提供 PixKeep 版本和 Windows 版本
+          required: true
+        - label: 我已提供了足够的信息来重现此问题
+          required: true
+        - label: 我已确认附件中不包含敏感信息
+          required: true

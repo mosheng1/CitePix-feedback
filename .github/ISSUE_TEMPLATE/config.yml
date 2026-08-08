@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 📦 发布说明
+    url: https://github.com/mosheng1/PixKeep-feedback/releases
+    about: 查看 PixKeep 的版本更新和发布内容
+  - name: 💬 讨论区
+    url: https://github.com/mosheng1/PixKeep-feedback/discussions
+    about: 参与产品讨论，分享使用经验和想法
+  - name: 👥 QQ 社区
+    url: https://qm.qq.com/q/EJyA2T7Xqg
+    about: 与其他 PixKeep 用户交流使用技巧
