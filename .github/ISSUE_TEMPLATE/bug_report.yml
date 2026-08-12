@@ -1,5 +1,5 @@
 name: 🐛 Bug 报告
-description: 报告 PixKeep 中的问题或异常行为
+description: 报告 CitePix 中的问题或异常行为
 title: "[Bug] "
 labels: ["bug", "需要分类"]
 body:
@@ -10,14 +10,14 @@ body:
 
         在提交之前，请确保：
         - ✅ 已搜索现有 Issues，确认这不是重复报告
-        - ✅ 尽量使用最新版本的 PixKeep
+        - ✅ 尽量使用最新版本的 CitePix
         - ✅ 截图或日志中不包含密码、隐私和其他敏感信息
 
   - type: input
     id: version
     attributes:
       label: 软件版本
-      description: 你正在使用的 PixKeep 版本号
+      description: 你正在使用的 CitePix 版本号
       placeholder: 例如：v0.1.0
     validations:
       required: true
@@ -38,7 +38,7 @@ body:
     id: install-type
     attributes:
       label: 安装方式
-      description: 你使用的 PixKeep 安装方式
+      description: 你使用的 CitePix 安装方式
       options:
         - 安装包
         - 便携版
@@ -80,7 +80,7 @@ body:
       label: 复现步骤
       description: 如何重现这个问题？
       placeholder: |
-        1. 打开 PixKeep
+        1. 打开 CitePix
         2. 执行……
         3. 看到……
     validations:
@@ -140,7 +140,7 @@ body:
       options:
         - label: 我已经搜索过现有的 Issues
           required: true
-        - label: 我已提供 PixKeep 版本和 Windows 版本
+        - label: 我已提供 CitePix 版本和 Windows 版本
           required: true
         - label: 我已提供了足够的信息来重现此问题
           required: true

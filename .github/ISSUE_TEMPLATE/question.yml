@@ -1,5 +1,5 @@
 name: ❓ 问题咨询
-description: 咨询 PixKeep 的使用、配置或兼容性问题
+description: 咨询 CitePix 的使用、配置或兼容性问题
 title: "[Question] "
 labels: ["question"]
 body:
@@ -45,7 +45,7 @@ body:
     id: version
     attributes:
       label: 软件版本
-      description: 你正在使用的 PixKeep 版本号
+      description: 你正在使用的 CitePix 版本号
       placeholder: 例如：v0.1.0
     validations:
       required: true
@@ -84,5 +84,5 @@ body:
       options:
         - label: 我已经查看过 README 和已有 Issues
           required: true
-        - label: 我已提供 PixKeep 版本和 Windows 版本
+        - label: 我已提供 CitePix 版本和 Windows 版本
           required: true
