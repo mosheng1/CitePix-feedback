@@ -1,8 +1,12 @@
 # CitePix
-
+<div align="center">
+<img src="images/icon.png" alt="CitePix Logo" width="120">
+<br>
+<h1 align="center">CitePix</h1>
+</div>
 > 不只截一张图，更把重要内容留在手边、随时继续处理。
 
-CitePix 是一款面向 Windows 的高性能截图、编辑与贴图工具。它将截图、OCR、标注、保存和桌面贴图整合为一条顺畅流程，特别适合需要反复整理、长期参考和快速输出图片的场景。
+CitePix 是一款纯Rust基于GPUI框架的原生高性能截图、编辑与贴图工具。它将 截图、录屏、贴图、标注、OCR文字识别、二维码识别 整合为一条顺畅流程，特别适合需要反复整理、长期参考和快速输出图片的场景。
 
 ## 核心优势
 
