@@ -88,8 +88,22 @@ jobs:
             Remove-Item Env:GIT_CONFIG_COUNT, Env:GIT_CONFIG_KEY_0, Env:GIT_CONFIG_VALUE_0
             $authorization = "AUTHORIZATION: basic $authorization"
             $stage = '验证私有 vendor 仓库读取权限'
-            git -c "http.https://github.com/.extraheader=$authorization" ls-remote https://github.com/mosheng1/CitePix-vendor.git HEAD *> $null
-            if ($LASTEXITCODE -ne 0) { throw '权限验证失败' }
+            $headers = @{ Authorization = "Bearer $env:VENDOR_TOKEN"; Accept = 'application/vnd.github+json' }
+            $response = Invoke-WebRequest -Uri 'https://api.github.com/repos/mosheng1/CitePix-vendor/git/ref/heads/master' -Headers $headers -SkipHttpErrorCheck
+            Write-Host "vendor API 读取状态：$([int]$response.StatusCode)"
+            $gitLog = Join-Path $env:RUNNER_TEMP 'citepix-access.log'
+            git -c "http.https://github.com/.extraheader=$authorization" ls-remote https://github.com/mosheng1/CitePix-vendor.git HEAD *> $gitLog
+            if ($LASTEXITCODE -ne 0) {
+              $diagnostic = Get-Content -LiteralPath $gitLog -Raw -Encoding UTF8
+              $category = '未分类的 Git 访问错误'
+              if ($diagnostic -match 'Repository not found|repository .* not found') { $category = '仓库对当前令牌不可见' }
+              elseif ($diagnostic -match 'Authentication failed|Invalid username|could not read Username|HTTP.*401') { $category = 'Git 身份验证失败' }
+              elseif ($diagnostic -match '403|denied|not accessible') { $category = '仓库访问被拒绝' }
+              elseif ($diagnostic -match 'Could not resolve|Failed to connect|timed out|SSL certificate') { $category = '网络或证书错误' }
+              elseif ($diagnostic -match 'config|extraheader|header') { $category = 'Git 认证配置错误' }
+              Write-Host "vendor Git 访问结果：$category"
+              throw '权限验证失败'
+            }
             Write-Host '已确认 vendor 仓库可读取。'
             $stage = '同步 vendor 子模块配置'
             git submodule sync --recursive *> $null
@@ -294,7 +308,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           try {
             $tempRoot = [IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\') + '\'
-            foreach ($path in @((Join-Path $env:RUNNER_TEMP 'citepix-private'), (Join-Path $env:RUNNER_TEMP 'citepix-ffmpeg.log'), (Join-Path $env:RUNNER_TEMP 'citepix-installer.log'))) {
+            foreach ($path in @((Join-Path $env:RUNNER_TEMP 'citepix-private'), (Join-Path $env:RUNNER_TEMP 'citepix-access.log'), (Join-Path $env:RUNNER_TEMP 'citepix-ffmpeg.log'), (Join-Path $env:RUNNER_TEMP 'citepix-installer.log'))) {
               $resolved = [IO.Path]::GetFullPath($path)
               if (-not $resolved.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase)) { throw '清理路径超出临时目录' }
               if (Test-Path -LiteralPath $resolved) { Remove-Item -LiteralPath $resolved -Recurse -Force }
