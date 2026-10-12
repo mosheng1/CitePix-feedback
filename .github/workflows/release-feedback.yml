@@ -85,12 +85,19 @@ jobs:
 
             $authorization = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("x-access-token:$env:VENDOR_TOKEN"))
             Write-Output "::add-mask::$authorization"
-            $env:GIT_CONFIG_VALUE_0 = "AUTHORIZATION: basic $authorization"
-            $stage = '拉取私有 vendor 子模块'
+            Remove-Item Env:GIT_CONFIG_COUNT, Env:GIT_CONFIG_KEY_0, Env:GIT_CONFIG_VALUE_0
+            $authorization = "AUTHORIZATION: basic $authorization"
+            $stage = '验证私有 vendor 仓库读取权限'
+            git -c "http.https://github.com/.extraheader=$authorization" ls-remote https://github.com/mosheng1/CitePix-vendor.git HEAD *> $null
+            if ($LASTEXITCODE -ne 0) { throw '权限验证失败' }
+            Write-Host '已确认 vendor 仓库可读取。'
+            $stage = '同步 vendor 子模块配置'
             git submodule sync --recursive *> $null
             if ($LASTEXITCODE -ne 0) { throw '同步失败' }
-            git submodule update --init --recursive *> $null
+            $stage = '拉取私有 vendor 子模块'
+            git -c "http.https://github.com/.extraheader=$authorization" submodule update --init --recursive *> $null
             if ($LASTEXITCODE -ne 0) { throw '检出失败' }
+            $stage = '检查 vendor 依赖完整性'
             if (-not (Test-Path -LiteralPath 'vendor\gpui-ce\crates\gpui\Cargo.toml')) {
               throw '依赖不完整'
             }
