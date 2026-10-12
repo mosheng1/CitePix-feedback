@@ -83,16 +83,19 @@ jobs:
             git checkout --quiet --detach FETCH_HEAD *> $null
             if ($LASTEXITCODE -ne 0) { throw '检出失败' }
 
-            $authorization = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("x-access-token:$env:VENDOR_TOKEN"))
-            Write-Output "::add-mask::$authorization"
             Remove-Item Env:GIT_CONFIG_COUNT, Env:GIT_CONFIG_KEY_0, Env:GIT_CONFIG_VALUE_0
-            $authorization = "AUTHORIZATION: basic $authorization"
+            $vendorUrl = "https://x-access-token:$env:VENDOR_TOKEN@github.com/mosheng1/CitePix-vendor.git"
+            Write-Output "::add-mask::$vendorUrl"
             $stage = '验证私有 vendor 仓库读取权限'
+            if ($env:SOURCE_TOKEN -ceq $env:VENDOR_TOKEN) { Write-Host '主仓库与 vendor 使用同一令牌。' }
+            else { Write-Host 'vendor 使用单独配置的令牌。' }
             $headers = @{ Authorization = "Bearer $env:VENDOR_TOKEN"; Accept = 'application/vnd.github+json' }
-            $response = Invoke-WebRequest -Uri 'https://api.github.com/repos/mosheng1/CitePix-vendor/git/ref/heads/master' -Headers $headers -SkipHttpErrorCheck
-            Write-Host "vendor API 读取状态：$([int]$response.StatusCode)"
+            foreach ($repository in @('CitePix', 'CitePix-vendor')) {
+              $response = Invoke-WebRequest -Uri "https://api.github.com/repos/mosheng1/$repository" -Headers $headers -SkipHttpErrorCheck
+              Write-Host "$repository API 可见状态：$([int]$response.StatusCode)"
+            }
             $gitLog = Join-Path $env:RUNNER_TEMP 'citepix-access.log'
-            git -c "http.https://github.com/.extraheader=$authorization" ls-remote https://github.com/mosheng1/CitePix-vendor.git HEAD *> $gitLog
+            git ls-remote $vendorUrl HEAD *> $gitLog
             if ($LASTEXITCODE -ne 0) {
               $diagnostic = Get-Content -LiteralPath $gitLog -Raw -Encoding UTF8
               $category = '未分类的 Git 访问错误'
@@ -108,8 +111,10 @@ jobs:
             $stage = '同步 vendor 子模块配置'
             git submodule sync --recursive *> $null
             if ($LASTEXITCODE -ne 0) { throw '同步失败' }
+            git config submodule.vendor.url $vendorUrl *> $null
+            if ($LASTEXITCODE -ne 0) { throw '配置失败' }
             $stage = '拉取私有 vendor 子模块'
-            git -c "http.https://github.com/.extraheader=$authorization" submodule update --init --recursive *> $null
+            git submodule update --init --recursive *> $null
             if ($LASTEXITCODE -ne 0) { throw '检出失败' }
             $stage = '检查 vendor 依赖完整性'
             if (-not (Test-Path -LiteralPath 'vendor\gpui-ce\crates\gpui\Cargo.toml')) {
