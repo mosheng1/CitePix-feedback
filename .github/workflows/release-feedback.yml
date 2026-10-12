@@ -1,0 +1,297 @@
+name: 构建 CitePix 并上传草稿发布
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: '私有 CitePix 的分支、标签或提交，例如 main 或 v0.5.1'
+        required: true
+        default: main
+        type: string
+      tag:
+        description: '发布标签；留空时使用私有项目版本，指定时必须与版本一致'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: citepix-draft-release
+  cancel-in-progress: false
+
+jobs:
+  build-and-upload:
+    if: github.repository == 'mosheng1/CitePix-feedback'
+    runs-on: windows-latest
+    timeout-minutes: 180
+    permissions:
+      contents: write
+    env:
+      SOURCE_REF: ${{ github.event_name == 'push' && github.ref || inputs.source_ref }}
+      MANUAL_TAG: ${{ inputs.tag || '' }}
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_RELEASE_LTO: fat
+      CARGO_PROFILE_RELEASE_OPT_LEVEL: '3'
+      CARGO_PROFILE_RELEASE_PANIC: abort
+      CARGO_PROFILE_RELEASE_STRIP: symbols
+      CARGO_PROFILE_RELEASE_DEBUG: 'false'
+      CARGO_PROFILE_RELEASE_INCREMENTAL: 'false'
+      CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS: 'false'
+      CITEPIX_RELEASE_GUI: '1'
+      CMAKE_GENERATOR: Ninja
+
+    steps:
+      # 私有源码只进入临时目录，不检出到公开仓库，也不缓存或上传构建目录。
+      - name: 静默拉取私有源码和 vendor 子模块
+        shell: pwsh
+        env:
+          SOURCE_TOKEN: ${{ secrets.CI_PULL_CITEPIX }}
+          VENDOR_TOKEN: ${{ secrets.VENDOR_REPO_TOKEN || secrets.CI_PULL_CITEPIX }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $env:CITEPIX_SOURCE = Join-Path $env:RUNNER_TEMP 'citepix-private'
+          "CITEPIX_SOURCE=$env:CITEPIX_SOURCE" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          if ([string]::IsNullOrWhiteSpace($env:SOURCE_TOKEN)) {
+            throw '未配置 CI_PULL_CITEPIX，请添加私有源码仓库的只读令牌。'
+          }
+          if ($env:SOURCE_REF -notmatch '^[0-9A-Za-z][0-9A-Za-z._/-]{0,199}$') {
+            throw '源码引用格式无效，请填写分支、标签或提交。'
+          }
+          $stage = '初始化源码目录'
+          try {
+            New-Item -ItemType Directory -Path $env:CITEPIX_SOURCE -Force | Out-Null
+            Set-Location -LiteralPath $env:CITEPIX_SOURCE
+            git init --quiet *> $null
+            if ($LASTEXITCODE -ne 0) { throw '初始化失败' }
+            git remote add origin https://github.com/mosheng1/CitePix.git *> $null
+            if ($LASTEXITCODE -ne 0) { throw '配置失败' }
+
+            $env:GIT_TERMINAL_PROMPT = '0'
+            $env:GIT_CONFIG_COUNT = '1'
+            $env:GIT_CONFIG_KEY_0 = 'http.https://github.com/.extraheader'
+            $authorization = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("x-access-token:$env:SOURCE_TOKEN"))
+            Write-Output "::add-mask::$authorization"
+            $env:GIT_CONFIG_VALUE_0 = "AUTHORIZATION: basic $authorization"
+            $stage = '拉取私有主仓库'
+            git fetch --quiet --no-tags --depth=1 origin $env:SOURCE_REF *> $null
+            if ($LASTEXITCODE -ne 0) { throw '拉取失败' }
+            git checkout --quiet --detach FETCH_HEAD *> $null
+            if ($LASTEXITCODE -ne 0) { throw '检出失败' }
+
+            $authorization = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("x-access-token:$env:VENDOR_TOKEN"))
+            Write-Output "::add-mask::$authorization"
+            $env:GIT_CONFIG_VALUE_0 = "AUTHORIZATION: basic $authorization"
+            $stage = '拉取私有 vendor 子模块'
+            git submodule sync --recursive *> $null
+            if ($LASTEXITCODE -ne 0) { throw '同步失败' }
+            git submodule update --init --recursive *> $null
+            if ($LASTEXITCODE -ne 0) { throw '检出失败' }
+            if (-not (Test-Path -LiteralPath 'vendor\gpui-ce\crates\gpui\Cargo.toml')) {
+              throw '依赖不完整'
+            }
+          } catch {
+            throw "$stage 失败。请检查源码引用及令牌对 CitePix、CitePix-vendor 的读取权限；原始输出已隐藏。"
+          } finally {
+            Remove-Item Env:GIT_CONFIG_COUNT, Env:GIT_CONFIG_KEY_0, Env:GIT_CONFIG_VALUE_0, Env:SOURCE_TOKEN, Env:VENDOR_TOKEN -ErrorAction SilentlyContinue
+          }
+          Write-Host '私有源码及依赖已准备完成，未输出源码内容。'
+
+      - name: 确定并校验发布版本
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          try {
+            $cargoToml = Get-Content -LiteralPath (Join-Path $env:CITEPIX_SOURCE 'Cargo.toml') -Raw -Encoding UTF8
+            $versionMatch = [regex]::Match($cargoToml, '(?m)^version\s*=\s*"(?<version>[^"\r\n]+)"')
+            if (-not $versionMatch.Success) { throw '版本读取失败' }
+            $version = $versionMatch.Groups['version'].Value
+            $tag = "v$version"
+            if ($env:GITHUB_EVENT_NAME -eq 'push') {
+              $tag = $env:GITHUB_REF_NAME
+            } elseif (-not [string]::IsNullOrWhiteSpace($env:MANUAL_TAG)) {
+              $tag = $env:MANUAL_TAG.Trim()
+            }
+            if ($tag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$' -or $tag -cne "v$version") {
+              throw '版本不一致'
+            }
+            "RELEASE_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            "RELEASE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          } catch {
+            throw '无法确定发布版本，或发布标签与源码版本不一致；原始输出已隐藏。'
+          }
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-x86_64-pc-windows-msvc
+
+      - name: 初始化 MSVC 构建环境
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: 配置 CMake 和 Windows 构建工具
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cmake = Join-Path $env:ProgramFiles 'CMake\bin\cmake.exe'
+          if (-not (Test-Path -LiteralPath $cmake)) { throw '未找到 CMake。' }
+          "CMAKE=$cmake" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) { throw '未找到 MSVC 编译器。' }
+          foreach ($setting in @('CC=cl.exe', 'CXX=cl.exe', 'CMAKE_C_COMPILER=cl.exe', 'CMAKE_CXX_COMPILER=cl.exe')) {
+            $setting | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          }
+          $isccCandidates = @(
+            (Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'),
+            (Join-Path $env:ProgramFiles 'Inno Setup 6\ISCC.exe')
+          )
+          if (-not ($isccCandidates | Where-Object { Test-Path -LiteralPath $_ })) {
+            choco install innosetup --no-progress --yes
+            if ($LASTEXITCODE -ne 0) { throw '安装 Inno Setup 失败。' }
+          }
+          if (-not (Get-Command clang.exe -ErrorAction SilentlyContinue)) {
+            choco install llvm --no-progress --yes
+            if ($LASTEXITCODE -ne 0) { throw '安装 LLVM 失败。' }
+          }
+          $llvmBin = Join-Path $env:ProgramFiles 'LLVM\bin'
+          if (Test-Path -LiteralPath (Join-Path $llvmBin 'clang.exe')) {
+            $llvmBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+          $packages = @{ 'make.exe' = 'make'; 'nasm.exe' = 'nasm'; 'pkg-config.exe' = 'pkgconfiglite' }
+          foreach ($tool in $packages.Keys) {
+            if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
+              choco install $packages[$tool] --no-progress --yes
+              if ($LASTEXITCODE -ne 0) { throw '安装 Windows 构建工具失败。' }
+            }
+          }
+
+      - name: 配置 bindgen 的 MSVC 头文件路径
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw '未找到 vswhere.exe。' }
+          $msvcInclude = @(& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'VC\Tools\MSVC\*\include' | Select-Object -Last 1)[0]
+          $kitsRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\Include'
+          $sdkVersion = Get-ChildItem -LiteralPath $kitsRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          if ($null -eq $msvcInclude -or $null -eq $sdkVersion) { throw '未找到 MSVC 或 Windows SDK 头文件。' }
+          $sdkInclude = Join-Path $kitsRoot $sdkVersion.Name
+          $includePaths = @($msvcInclude, (Join-Path $sdkInclude 'ucrt'), (Join-Path $sdkInclude 'shared'), (Join-Path $sdkInclude 'um'))
+          if ($includePaths | Where-Object { -not (Test-Path -LiteralPath $_) }) { throw 'MSVC 或 Windows SDK 头文件目录不完整。' }
+          $clangArgs = ($includePaths | ForEach-Object { '-I"{0}"' -f $_ }) -join ' '
+          "BINDGEN_EXTRA_CLANG_ARGS_x86_64_pc_windows_msvc=$clangArgs" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      # 子进程的全部输出仅保存在临时日志中，失败时也不回显或上传。
+      - name: 静默构建裁剪版 FFmpeg 运行时
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $log = Join-Path $env:RUNNER_TEMP 'citepix-ffmpeg.log'
+          try {
+            Set-Location -LiteralPath $env:CITEPIX_SOURCE
+            & pwsh -NoLogo -NoProfile -NonInteractive -File '.\installer\build-ffmpeg.ps1' *> $log
+            if ($LASTEXITCODE -ne 0) { throw '构建失败' }
+          } catch {
+            throw 'FFmpeg 运行时构建失败；为保护私有源码，构建日志不公开。'
+          }
+          Write-Host 'FFmpeg 运行时构建完成。'
+
+      - name: 静默生成 Windows 安装版和便携版
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $log = Join-Path $env:RUNNER_TEMP 'citepix-installer.log'
+          try {
+            Set-Location -LiteralPath $env:CITEPIX_SOURCE
+            & pwsh -NoLogo -NoProfile -NonInteractive -File '.\installer\build-installer.ps1' *> $log
+            if ($LASTEXITCODE -ne 0) { throw '构建失败' }
+          } catch {
+            throw '安装版或便携版构建失败；为保护私有源码，构建日志不公开。'
+          }
+          Write-Host 'Windows 安装版和便携版构建完成。'
+
+      - name: 验证 GUI 二进制和发布包内容
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          try {
+            $executable = Join-Path $env:CITEPIX_SOURCE 'target\release\CitePix.exe'
+            $bytes = [IO.File]::ReadAllBytes($executable)
+            $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
+            if ([BitConverter]::ToUInt16($bytes, $peOffset + 24 + 68) -ne 2) { throw 'GUI 子系统校验失败' }
+            $dist = Join-Path $env:CITEPIX_SOURCE 'dist'
+            $portable = Join-Path $dist "CitePix-$env:RELEASE_VERSION-x64.zip"
+            $installer = Join-Path $dist "CitePix-Setup-$env:RELEASE_VERSION-x64.exe"
+            if (-not (Test-Path -LiteralPath $portable -PathType Leaf) -or -not (Test-Path -LiteralPath $installer -PathType Leaf)) {
+              throw '发布包缺失'
+            }
+            $archive = [IO.Compression.ZipFile]::OpenRead($portable)
+            try {
+              $names = @($archive.Entries | ForEach-Object { $_.FullName })
+              foreach ($name in $names) {
+                if ($name -cnotmatch '^(?:CitePix\.exe|CitePix\.portable|openh264\.dll|(?:avcodec|avformat|avutil|swresample|swscale)-[0-9]+\.dll)$') {
+                  throw '发布包包含非运行时文件'
+                }
+              }
+              foreach ($pattern in @('^CitePix\.exe$', '^CitePix\.portable$', '^openh264\.dll$', '^avcodec-[0-9]+\.dll$', '^avformat-[0-9]+\.dll$', '^avutil-[0-9]+\.dll$', '^swresample-[0-9]+\.dll$', '^swscale-[0-9]+\.dll$')) {
+                if (@($names | Where-Object { $_ -cmatch $pattern }).Count -ne 1) { throw '发布包运行时文件不完整' }
+              }
+            } finally {
+              $archive.Dispose()
+            }
+          } catch {
+            throw '发布产物校验失败，已阻止上传；原始输出已隐藏。'
+          }
+          Write-Host '已确认 GUI 子系统及便携包文件白名单。'
+
+      - name: 创建或更新本仓库草稿发布
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $repo = $env:GITHUB_REPOSITORY
+          $tag = $env:RELEASE_TAG
+          # 通过成功返回的发布列表区分草稿与不存在，避免将权限或网络错误当成不存在。
+          $releaseJson = gh api "repos/$repo/releases?per_page=100" --paginate --slurp 2>$null
+          if ($LASTEXITCODE -ne 0) { throw '查询草稿发布失败。' }
+          $releases = (($releaseJson -join "`n") | ConvertFrom-Json) | ForEach-Object { $_ }
+          $release = $releases | Where-Object { $_.tag_name -ceq $tag } | Select-Object -First 1
+          if ($null -ne $release) {
+            if (-not $release.draft) { throw '该版本已正式发布，工作流禁止覆盖。' }
+          } else {
+            # 标签指向公开反馈仓库的提交，不将私有仓库历史或提交用于发布标签。
+            gh release create $tag --repo $repo --target $env:GITHUB_SHA --draft --title "CitePix $tag" --notes '安装版与便携版构建完成，发布说明待补充。'
+            if ($LASTEXITCODE -ne 0) { throw '创建草稿发布失败。' }
+          }
+          $dist = Join-Path $env:CITEPIX_SOURCE 'dist'
+          $assets = @(
+            (Join-Path $dist "CitePix-$env:RELEASE_VERSION-x64.zip"),
+            (Join-Path $dist "CitePix-Setup-$env:RELEASE_VERSION-x64.exe")
+          )
+          gh release upload $tag --repo $repo --clobber @assets
+          if ($LASTEXITCODE -ne 0) { throw '上传草稿发布产物失败。' }
+
+      - name: 清理私有源码和临时日志
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          try {
+            $tempRoot = [IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\') + '\'
+            foreach ($path in @((Join-Path $env:RUNNER_TEMP 'citepix-private'), (Join-Path $env:RUNNER_TEMP 'citepix-ffmpeg.log'), (Join-Path $env:RUNNER_TEMP 'citepix-installer.log'))) {
+              $resolved = [IO.Path]::GetFullPath($path)
+              if (-not $resolved.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase)) { throw '清理路径超出临时目录' }
+              if (Test-Path -LiteralPath $resolved) { Remove-Item -LiteralPath $resolved -Recurse -Force }
+            }
+          } catch {
+            throw '清理临时目录失败；原始输出已隐藏。'
+          }
