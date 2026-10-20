@@ -213,21 +213,6 @@ jobs:
           "BINDGEN_EXTRA_CLANG_ARGS_x86_64_pc_windows_msvc=$clangArgs" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       # 子进程的全部输出仅保存在临时日志中，失败时也不回显或上传。
-      - name: 静默构建裁剪版 FFmpeg 运行时
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $false
-          $log = Join-Path $env:RUNNER_TEMP 'citepix-ffmpeg.log'
-          try {
-            Set-Location -LiteralPath $env:CITEPIX_SOURCE
-            & pwsh -NoLogo -NoProfile -NonInteractive -File '.\installer\build-ffmpeg.ps1' *> $log
-            if ($LASTEXITCODE -ne 0) { throw '构建失败' }
-          } catch {
-            throw 'FFmpeg 运行时构建失败；为保护私有源码，构建日志不公开。'
-          }
-          Write-Host 'FFmpeg 运行时构建完成。'
-
       - name: 静默生成 Windows 安装版和便携版
         shell: pwsh
         run: |
