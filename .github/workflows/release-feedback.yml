@@ -264,6 +264,47 @@ jobs:
           }
           Write-Host 'Windows 安装版和便携版构建完成。'
 
+      - name: 加密保存失败诊断
+        if: failure()
+        shell: pwsh
+        env:
+          BUILD_DIAGNOSTICS_KEY: ${{ secrets.BUILD_DIAGNOSTICS_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $log = Join-Path $env:RUNNER_TEMP 'citepix-installer.log'
+          if (-not (Test-Path -LiteralPath $log -PathType Leaf)) { exit 0 }
+          if ([string]::IsNullOrWhiteSpace($env:BUILD_DIAGNOSTICS_KEY)) {
+            throw '未配置 BUILD_DIAGNOSTICS_KEY，无法加密保存失败诊断。'
+          }
+          $key = [Convert]::FromBase64String($env:BUILD_DIAGNOSTICS_KEY)
+          $nonce = [Security.Cryptography.RandomNumberGenerator]::GetBytes(12)
+          $tag = [byte[]]::new(16)
+          $plaintext = [IO.File]::ReadAllBytes($log)
+          $ciphertext = [byte[]]::new($plaintext.Length)
+          $aes = [Security.Cryptography.AesGcm]::new($key, 16)
+          $output = [IO.File]::Create((Join-Path $env:RUNNER_TEMP 'citepix-diagnostics.aes'))
+          try {
+            $aes.Encrypt($nonce, $plaintext, $ciphertext, $tag)
+            $output.Write($nonce, 0, $nonce.Length)
+            $output.Write($tag, 0, $tag.Length)
+            $output.Write($ciphertext, 0, $ciphertext.Length)
+          } finally {
+            $output.Dispose()
+            $aes.Dispose()
+            [Array]::Clear($key, 0, $key.Length)
+            [Array]::Clear($plaintext, 0, $plaintext.Length)
+          }
+          Write-Host '失败诊断已加密，公开附件不包含明文日志。'
+
+      - name: 上传加密失败诊断
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-diagnostics-${{ github.run_id }}
+          path: ${{ runner.temp }}/citepix-diagnostics.aes
+          if-no-files-found: ignore
+          retention-days: 1
+
       - name: 验证 GUI 二进制和发布包内容
         shell: pwsh
         run: |
@@ -339,7 +380,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           try {
             $tempRoot = [IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\') + '\'
-            foreach ($path in @((Join-Path $env:RUNNER_TEMP 'citepix-private'), (Join-Path $env:RUNNER_TEMP 'citepix-access.log'), (Join-Path $env:RUNNER_TEMP 'citepix-ffmpeg.log'), (Join-Path $env:RUNNER_TEMP 'citepix-installer.log'))) {
+            foreach ($path in @((Join-Path $env:RUNNER_TEMP 'citepix-private'), (Join-Path $env:RUNNER_TEMP 'citepix-access.log'), (Join-Path $env:RUNNER_TEMP 'citepix-ffmpeg.log'), (Join-Path $env:RUNNER_TEMP 'citepix-installer.log'), (Join-Path $env:RUNNER_TEMP 'citepix-diagnostics.aes'))) {
               $resolved = [IO.Path]::GetFullPath($path)
               if (-not $resolved.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase)) { throw '清理路径超出临时目录' }
               if (Test-Path -LiteralPath $resolved) { Remove-Item -LiteralPath $resolved -Recurse -Force }
