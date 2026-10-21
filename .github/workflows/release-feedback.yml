@@ -212,7 +212,7 @@ jobs:
           $clangArgs = ($includePaths | ForEach-Object { '-I"{0}"' -f $_ }) -join ' '
           "BINDGEN_EXTRA_CLANG_ARGS_x86_64_pc_windows_msvc=$clangArgs" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      # 子进程的全部输出仅保存在临时日志中，失败时也不回显或上传。
+      # 原始日志只保存在临时目录；失败时仅输出固定阶段、错误分类和错误码。
       - name: 静默生成 Windows 安装版和便携版
         shell: pwsh
         run: |
@@ -224,6 +224,42 @@ jobs:
             & pwsh -NoLogo -NoProfile -NonInteractive -File '.\installer\build-installer.ps1' *> $log
             if ($LASTEXITCODE -ne 0) { throw '构建失败' }
           } catch {
+            if (Test-Path -LiteralPath $log -PathType Leaf) {
+              $diagnostic = Get-Content -LiteralPath $log -Raw -Encoding UTF8
+              $stage = '安装包构建脚本初始化'
+              $lastStageIndex = -1
+              $stages = @(
+                @{ Pattern = 'FFmpeg 构建输入或产物变化，开始构建。'; Name = 'FFmpeg 原生依赖构建' },
+                @{ Pattern = 'MNN 翻译构建输入或产物变化，开始构建。'; Name = 'MNN 翻译运行时构建' },
+                @{ Pattern = '已校验 Haidass 翻译 DLL'; Name = '第三方声明生成或 Rust 编译准备' },
+                @{ Pattern = '(?m)^\s*Compiling\s|error\[E[0-9]{4}\]'; Name = 'Rust 编译' },
+                @{ Pattern = 'Inno Setup|Inno Setup Compiler'; Name = 'Inno Setup 安装包生成' }
+              )
+              foreach ($candidate in $stages) {
+                foreach ($match in [regex]::Matches($diagnostic, $candidate.Pattern)) {
+                  if ($match.Index -gt $lastStageIndex) {
+                    $lastStageIndex = $match.Index
+                    $stage = $candidate.Name
+                  }
+                }
+              }
+              Write-Host "失败阶段：$stage"
+              $categories = @(
+                @{ Pattern = 'SHA-256 校验失败|翻译运行时校验失败'; Name = '依赖校验失败' },
+                @{ Pattern = 'FFmpeg 源码构建缺少工具|未找到.*(?:编译器|工具链)|is not recognized'; Name = '构建工具缺失' },
+                @{ Pattern = 'unable to create an executable|C compiler test failed'; Name = '原生编译器或链接器探测失败' },
+                @{ Pattern = 'ERROR:.*not found|ERROR:.*not supported'; Name = 'FFmpeg 依赖探测失败' },
+                @{ Pattern = 'Could not resolve|Failed to connect|timed out|404.*Not Found'; Name = '依赖下载或网络访问失败' },
+                @{ Pattern = 'Bash 构建命令失败'; Name = '原生依赖构建命令失败' }
+              )
+              foreach ($category in $categories) {
+                if ($diagnostic -match $category.Pattern) { Write-Host "错误分类：$($category.Name)" }
+              }
+              $errorCodes = @([regex]::Matches($diagnostic, '\berror\[(E[0-9]{4})\]|\b(?:fatal )?error ((?:C|LNK)[0-9]{4})\b') |
+                ForEach-Object { $_.Groups[1].Value; $_.Groups[2].Value } |
+                Where-Object { $_ } | Sort-Object -Unique)
+              if ($errorCodes.Count -gt 0) { Write-Host "编译错误码：$($errorCodes -join '、')" }
+            }
             throw '安装版或便携版构建失败；为保护私有源码，构建日志不公开。'
           }
           Write-Host 'Windows 安装版和便携版构建完成。'
@@ -247,12 +283,17 @@ jobs:
             try {
               $names = @($archive.Entries | ForEach-Object { $_.FullName })
               foreach ($name in $names) {
-                if ($name -cnotmatch '^(?:CitePix\.exe|CitePix\.portable|openh264\.dll|(?:avcodec|avformat|avutil|swresample|swscale)-[0-9]+\.dll)$') {
+                if ($name -cnotmatch '^(?:CitePix\.exe|CitePix\.portable|openh264\.dll|(?:avcodec|avformat|avutil|swresample|swscale)-[0-9]+\.dll|runtime/translation/(?:haidass_mnn\.dll|runtime\.json|citepix_mnn\.dll|mnn-runtime\.json|SDK-LICENSE\.txt|MNN-LICENSE\.txt))$') {
                   throw '发布包包含非运行时文件'
                 }
               }
               foreach ($pattern in @('^CitePix\.exe$', '^CitePix\.portable$', '^openh264\.dll$', '^avcodec-[0-9]+\.dll$', '^avformat-[0-9]+\.dll$', '^avutil-[0-9]+\.dll$', '^swresample-[0-9]+\.dll$', '^swscale-[0-9]+\.dll$')) {
                 if (@($names | Where-Object { $_ -cmatch $pattern }).Count -ne 1) { throw '发布包运行时文件不完整' }
+              }
+              foreach ($name in @('haidass_mnn.dll', 'runtime.json', 'citepix_mnn.dll', 'mnn-runtime.json', 'SDK-LICENSE.txt', 'MNN-LICENSE.txt')) {
+                if (@($names | Where-Object { $_ -ceq "runtime/translation/$name" }).Count -ne 1) {
+                  throw '发布包翻译运行时文件不完整'
+                }
               }
             } finally {
               $archive.Dispose()
