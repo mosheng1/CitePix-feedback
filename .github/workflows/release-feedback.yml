@@ -169,6 +169,12 @@ jobs:
           if (-not (Test-Path -LiteralPath $cmake)) { throw '未找到 CMake。' }
           "CMAKE=$cmake" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) { throw '未找到 MSVC 编译器。' }
+          $msvcLink = @(Get-Command link.exe -All -ErrorAction SilentlyContinue) |
+            Where-Object { $_.Path -match '(?i)\\VC\\Tools\\MSVC\\[^\\]+\\bin\\Hostx64\\x64\\link\.exe$' } |
+            Select-Object -First 1
+          if ($null -eq $msvcLink) { throw '未找到 MSVC x64 链接器。' }
+          # FFmpeg 准备工具可能调整 PATH，Cargo 必须始终使用 MSVC 链接器。
+          "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$($msvcLink.Path)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           foreach ($setting in @('CC=cl.exe', 'CXX=cl.exe', 'CMAKE_C_COMPILER=cl.exe', 'CMAKE_CXX_COMPILER=cl.exe')) {
             $setting | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           }
