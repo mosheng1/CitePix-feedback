@@ -4,6 +4,12 @@ on:
   release:
     types: [published, edited, deleted]
   workflow_dispatch:
+    inputs:
+      reorder:
+        description: '重建 Gitee Releases 顺序；会删除并重新创建所有 Gitee Release'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -21,6 +27,7 @@ jobs:
       GITEE_REPO: mk-mo-sheng/CitePix-feedback
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
       GH_TOKEN: ${{ github.token }}
+      REORDER_RELEASES: ${{ inputs.reorder || false }}
 
     steps:
       - name: 检出完整标签历史

@@ -23,6 +23,7 @@ GITHUB_TOKEN = os.environ["GH_TOKEN"]
 GITEE_TOKEN = os.environ["GITEE_TOKEN"]
 EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME", "workflow_dispatch")
 EVENT_PATH = Path(os.environ["GITHUB_EVENT_PATH"])
+REORDER_RELEASES = os.environ.get("REORDER_RELEASES", "false").lower() == "true"
 
 
 def request_json(
@@ -316,6 +317,19 @@ def delete_stale_releases(github_releases_list: list[dict], gitee_releases_list:
         print(f"已删除多余 Gitee Release：{release.get('tag_name', release['id'])}", flush=True)
 
 
+def delete_all_releases(releases: list[dict]) -> None:
+    """删除 Gitee Release 对象，供一次性重建排序使用。"""
+    for release in releases:
+        request_json(
+            GITEE_API,
+            f"/repos/{GITEE_REPO}/releases/{release['id']}",
+            GITEE_TOKEN,
+            method="DELETE",
+            gitee=True,
+        )
+        print(f"已删除待重建 Release：{release.get('tag_name', release['id'])}", flush=True)
+
+
 def main() -> None:
     if not GITEE_TOKEN:
         raise RuntimeError("环境变量 GITEE_TOKEN 为空")
@@ -348,9 +362,13 @@ def main() -> None:
         ]
     else:
         releases = github_releases()
-        delete_stale_releases(releases, target_releases)
+        if REORDER_RELEASES:
+            delete_all_releases(target_releases)
+            target_releases = []
+        else:
+            delete_stale_releases(releases, target_releases)
     errors = []
-    for release in reversed(releases):
+    for release in releases:
         try:
             sync_release(release, target_releases)
         except Exception as error:  # noqa: BLE001 - 继续处理其他版本后统一失败
