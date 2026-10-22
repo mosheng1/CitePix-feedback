@@ -86,20 +86,30 @@ def request_form(path: str, token: str, method: str, payload: dict) -> dict:
 
 
 def github_releases() -> list[dict]:
+    """按本次检出的标签逐个读取 Release，规避列表接口返回空数组的问题。"""
+    tag_output = subprocess.run(
+        ["git", "tag", "--list", "v*"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
     releases = []
-    page = 1
-    while True:
-        batch = request_json(
-            GITHUB_API,
-            f"/repos/{GITHUB_REPO}/releases?per_page=100&page={page}",
-            GITHUB_TOKEN,
-        )
-        if not batch:
-            return releases
-        releases.extend(batch)
-        if len(batch) < 100:
-            return releases
-        page += 1
+    for tag in sorted(filter(None, tag_output.splitlines())):
+        encoded_tag = urllib.parse.quote(tag, safe="")
+        try:
+            releases.append(
+                request_json(
+                    GITHUB_API,
+                    f"/repos/{GITHUB_REPO}/releases/tags/{encoded_tag}",
+                    GITHUB_TOKEN,
+                )
+            )
+        except RuntimeError as error:
+            if "HTTP 404" in str(error):
+                print(f"标签没有对应 GitHub Release，跳过：{tag}", flush=True)
+                continue
+            raise
+    return releases
 
 
 def gitee_releases() -> list[dict]:
