@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import urllib.error
@@ -146,51 +147,76 @@ def delete_asset(release_id: int, asset_id: int) -> None:
 
 
 def download_asset(asset: dict, target: Path) -> None:
-    headers = {
-        "Accept": "application/octet-stream",
-        "Authorization": f"Bearer {GITHUB_TOKEN}",
-        "User-Agent": "CitePix-release-sync",
-    }
-    request = urllib.request.Request(asset["url"], headers=headers)
     try:
-        with urllib.request.urlopen(request, timeout=300) as response, target.open("wb") as output:
-            while chunk := response.read(1024 * 1024):
-                output.write(chunk)
-    except urllib.error.HTTPError as error:
-        raise RuntimeError(f"下载附件失败：{asset['name']}，HTTP {error.code}") from error
+        subprocess.run(
+            [
+                "curl",
+                "--fail-with-body",
+                "--silent",
+                "--show-error",
+                "--location",
+                "--retry",
+                "3",
+                "--retry-all-errors",
+                "--retry-delay",
+                "5",
+                "--connect-timeout",
+                "30",
+                "--max-time",
+                "900",
+                "--user-agent",
+                "CitePix-release-sync",
+                "--header",
+                "Accept: application/octet-stream",
+                "--header",
+                f"Authorization: Bearer {GITHUB_TOKEN}",
+                "--output",
+                str(target),
+                asset["url"],
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as error:
+        detail = (error.stderr or error.stdout or "").strip()[-500:]
+        raise RuntimeError(f"下载附件失败：{asset['name']}，{detail}") from error
 
 
 def upload_asset(release_id: int, asset: dict, path: Path) -> None:
-    boundary = "----CitePixReleaseSyncBoundary"
-    prefix = (
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="file"; filename="{asset["name"]}"\r\n'
-        "Content-Type: application/octet-stream\r\n\r\n"
-    ).encode("utf-8")
-    suffix = f"\r\n--{boundary}--\r\n".encode("ascii")
-    data = prefix + path.read_bytes() + suffix
     url = (
         f"{GITEE_API}/repos/{GITEE_REPO}/releases/{release_id}/attach_files"
         f"?access_token={urllib.parse.quote(GITEE_TOKEN)}"
     )
-    request = urllib.request.Request(
-        url,
-        data=data,
-        headers={
-            "Accept": "application/json",
-            "Content-Type": f"multipart/form-data; boundary={boundary}",
-            "User-Agent": "CitePix-release-sync",
-        },
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(request, timeout=300):
-            pass
-    except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")[:500]
-        raise RuntimeError(
-            f"上传附件失败：{asset['name']}，HTTP {error.code}，{detail}"
-        ) from error
+        subprocess.run(
+            [
+                "curl",
+                "--fail-with-body",
+                "--silent",
+                "--show-error",
+                "--retry",
+                "3",
+                "--retry-all-errors",
+                "--retry-delay",
+                "5",
+                "--connect-timeout",
+                "30",
+                "--max-time",
+                "900",
+                "--user-agent",
+                "CitePix-release-sync",
+                "--form",
+                f"file=@{path};filename={asset['name']}",
+                url,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as error:
+        detail = (error.stderr or error.stdout or "").strip()[-500:]
+        raise RuntimeError(f"上传附件失败：{asset['name']}，{detail}") from error
 
 
 def sync_assets(github_release: dict, gitee_release: dict) -> None:
@@ -199,15 +225,15 @@ def sync_assets(github_release: dict, gitee_release: dict) -> None:
         for asset in github_release.get("assets", []):
             old = existing.get(asset["name"])
             if old and old.get("size") == asset.get("size"):
-                print(f"附件已存在，跳过：{asset['name']}")
+                print(f"附件已存在，跳过：{asset['name']}", flush=True)
                 continue
             if old:
                 delete_asset(gitee_release["id"], old["id"])
-                print(f"已删除旧附件：{asset['name']}")
+                print(f"已删除旧附件：{asset['name']}", flush=True)
             path = Path(directory) / asset["name"]
             download_asset(asset, path)
             upload_asset(gitee_release["id"], asset, path)
-            print(f"已上传附件：{asset['name']}")
+            print(f"已上传附件：{asset['name']}", flush=True)
 
 
 def sync_release(github_release: dict, existing: list[dict]) -> None:
@@ -226,7 +252,7 @@ def sync_release(github_release: dict, existing: list[dict]) -> None:
             method="PATCH",
             payload=payload,
         )
-        print(f"已更新 Release：{tag}")
+        print(f"已更新 Release：{tag}", flush=True)
     else:
         current = request_form(
             f"/repos/{GITEE_REPO}/releases",
@@ -237,7 +263,7 @@ def sync_release(github_release: dict, existing: list[dict]) -> None:
                 "target_commitish": github_release.get("target_commitish") or tag,
             },
         )
-        print(f"已创建 Release：{tag}")
+        print(f"已创建 Release：{tag}", flush=True)
     sync_assets(github_release, current)
 
 
@@ -254,7 +280,7 @@ def delete_stale_releases(github_releases_list: list[dict], gitee_releases_list:
             method="DELETE",
             gitee=True,
         )
-        print(f"已删除多余 Gitee Release：{release.get('tag_name', release['id'])}")
+        print(f"已删除多余 Gitee Release：{release.get('tag_name', release['id'])}", flush=True)
 
 
 def main() -> None:
@@ -273,9 +299,9 @@ def main() -> None:
                 method="DELETE",
                 gitee=True,
             )
-            print(f"已删除 Gitee Release：{tag}")
+            print(f"已删除 Gitee Release：{tag}", flush=True)
         else:
-            print(f"Gitee 没有对应 Release，无需删除：{tag}")
+            print(f"Gitee 没有对应 Release，无需删除：{tag}", flush=True)
         return
 
     if EVENT_NAME == "release" and event:
@@ -290,8 +316,15 @@ def main() -> None:
     else:
         releases = github_releases()
         delete_stale_releases(releases, target_releases)
+    errors = []
     for release in reversed(releases):
-        sync_release(release, target_releases)
+        try:
+            sync_release(release, target_releases)
+        except Exception as error:  # noqa: BLE001 - 继续处理其他版本后统一失败
+            errors.append(f"{release.get('tag_name', '未知版本')}：{error}")
+            print(f"同步版本失败，继续处理后续版本：{errors[-1]}", flush=True)
+    if errors:
+        raise RuntimeError("；".join(errors))
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ jobs:
   sync:
     if: github.repository == 'mosheng1/CitePix-feedback'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 120
     env:
       GITEE_REPO: mk-mo-sheng/CitePix-feedback
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
