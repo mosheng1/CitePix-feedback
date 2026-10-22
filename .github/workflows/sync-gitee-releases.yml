@@ -1,0 +1,61 @@
+name: 同步 GitHub Releases 到 Gitee
+
+on:
+  release:
+    types: [published, edited, deleted]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-gitee-releases
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'mosheng1/CitePix-feedback'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GITEE_REPO: mk-mo-sheng/CitePix-feedback
+      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: 检出完整标签历史
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 校验 Gitee 令牌
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${GITEE_TOKEN}" ]]; then
+            echo '未配置 GITEE_TOKEN，请在仓库 Settings > Secrets and variables > Actions 中添加 Gitee 私人令牌。' >&2
+            exit 1
+          fi
+          status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+            --get --data-urlencode "access_token=${GITEE_TOKEN}" \
+            'https://gitee.com/api/v5/user')"
+          if [[ "${status}" != '200' ]]; then
+            echo "Gitee 令牌校验失败，HTTP 状态码：${status}" >&2
+            exit 1
+          fi
+
+      - name: 推送发布标签到 Gitee
+        shell: bash
+        run: |
+          set -euo pipefail
+          remote="https://oauth2:${GITEE_TOKEN}@gitee.com/${GITEE_REPO}.git"
+          if [[ "${GITHUB_EVENT_NAME}" == 'workflow_dispatch' ]]; then
+            git push --quiet "${remote}" --tags
+          elif [[ "${GITHUB_EVENT_NAME}" != 'release' || "${{ github.event.action }}" != 'deleted' ]]; then
+            git push --quiet "${remote}" \
+              "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          fi
+
+      - name: 同步发布说明和附件
+        shell: bash
+        run: python3 .github/scripts/sync-gitee-releases.py
