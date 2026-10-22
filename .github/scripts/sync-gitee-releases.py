@@ -158,6 +158,7 @@ def delete_asset(release_id: int, asset_id: int) -> None:
 
 
 def download_asset(asset: dict, target: Path) -> None:
+    download_url = asset.get("browser_download_url") or asset["url"]
     try:
         subprocess.run(
             [
@@ -180,13 +181,9 @@ def download_asset(asset: dict, target: Path) -> None:
                 "300",
                 "--user-agent",
                 "CitePix-release-sync",
-                "--header",
-                "Accept: application/octet-stream",
-                "--header",
-                f"Authorization: Bearer {GITHUB_TOKEN}",
                 "--output",
                 str(target),
-                asset["url"],
+                download_url,
             ],
             check=True,
             capture_output=True,
