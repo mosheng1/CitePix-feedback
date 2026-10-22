@@ -217,6 +217,8 @@ def upload_asset(release_id: int, asset: dict, path: Path) -> None:
                 "--user-agent",
                 "CitePix-release-sync",
                 "--form",
+                f"access_token={GITEE_TOKEN}",
+                "--form",
                 f"file=@{path};filename={asset['name']}",
                 url,
             ],
