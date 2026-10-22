@@ -11,6 +11,7 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 
@@ -170,10 +171,13 @@ def download_asset(asset: dict, target: Path) -> None:
                 "--retry-all-errors",
                 "--retry-delay",
                 "5",
+                "--http1.1",
+                "--header",
+                "Expect:",
                 "--connect-timeout",
                 "30",
                 "--max-time",
-                "900",
+                "300",
                 "--user-agent",
                 "CitePix-release-sync",
                 "--header",
@@ -210,10 +214,13 @@ def upload_asset(release_id: int, asset: dict, path: Path) -> None:
                 "--retry-all-errors",
                 "--retry-delay",
                 "5",
+                "--http1.1",
+                "--header",
+                "Expect:",
                 "--connect-timeout",
                 "30",
                 "--max-time",
-                "900",
+                "300",
                 "--user-agent",
                 "CitePix-release-sync",
                 "--form",
@@ -234,6 +241,7 @@ def upload_asset(release_id: int, asset: dict, path: Path) -> None:
 def sync_assets(github_release: dict, gitee_release: dict) -> None:
     existing = {asset["name"]: asset for asset in release_assets(gitee_release["id"])}
     with tempfile.TemporaryDirectory(prefix="citepix-release-") as directory:
+        pending = []
         for asset in github_release.get("assets", []):
             old = existing.get(asset["name"])
             if old and old.get("size") == asset.get("size"):
@@ -243,9 +251,25 @@ def sync_assets(github_release: dict, gitee_release: dict) -> None:
                 delete_asset(gitee_release["id"], old["id"])
                 print(f"已删除旧附件：{asset['name']}", flush=True)
             path = Path(directory) / asset["name"]
+            pending.append((asset, path))
+
+        def sync_one(asset: dict, path: Path) -> None:
             download_asset(asset, path)
             upload_asset(gitee_release["id"], asset, path)
             print(f"已上传附件：{asset['name']}", flush=True)
+
+        if not pending:
+            return
+        errors = []
+        with ThreadPoolExecutor(max_workers=min(4, len(pending))) as executor:
+            futures = [executor.submit(sync_one, asset, path) for asset, path in pending]
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as error:  # noqa: BLE001 - 汇总并继续其他附件
+                    errors.append(str(error))
+        if errors:
+            raise RuntimeError("；".join(errors))
 
 
 def sync_release(github_release: dict, existing: list[dict]) -> None:
