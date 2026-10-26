@@ -1,9 +1,7 @@
 name: 构建 CitePix 并上传草稿发布
+run-name: 手动构建 CitePix（源码：${{ inputs.source_ref }}）
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
       source_ref:
@@ -31,7 +29,7 @@ jobs:
     permissions:
       contents: write
     env:
-      SOURCE_REF: ${{ github.event_name == 'push' && github.ref || inputs.source_ref }}
+      SOURCE_REF: ${{ inputs.source_ref }}
       MANUAL_TAG: ${{ inputs.tag || '' }}
       CARGO_TERM_COLOR: never
       CARGO_PROFILE_RELEASE_LTO: fat
@@ -137,9 +135,7 @@ jobs:
             if (-not $versionMatch.Success) { throw '版本读取失败' }
             $version = $versionMatch.Groups['version'].Value
             $tag = "v$version"
-            if ($env:GITHUB_EVENT_NAME -eq 'push') {
-              $tag = $env:GITHUB_REF_NAME
-            } elseif (-not [string]::IsNullOrWhiteSpace($env:MANUAL_TAG)) {
+            if (-not [string]::IsNullOrWhiteSpace($env:MANUAL_TAG)) {
               $tag = $env:MANUAL_TAG.Trim()
             }
             if ($tag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$' -or $tag -cne "v$version") {

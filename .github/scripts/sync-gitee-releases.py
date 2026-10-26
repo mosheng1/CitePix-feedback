@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -132,11 +133,10 @@ def gitee_releases() -> list[dict]:
         page += 1
 
 
-def event_release() -> dict | None:
+def github_event() -> dict:
     if EVENT_NAME == "workflow_dispatch":
-        return None
-    event = json.loads(EVENT_PATH.read_text(encoding="utf-8"))
-    return event.get("release")
+        return {}
+    return json.loads(EVENT_PATH.read_text(encoding="utf-8"))
 
 
 def release_assets(release_id: int) -> list[dict]:
@@ -193,47 +193,81 @@ def download_asset(asset: dict, target: Path) -> None:
     except subprocess.CalledProcessError as error:
         detail = (error.stderr or error.stdout or "").strip()[-500:]
         raise RuntimeError(f"下载附件失败：{asset['name']}，{detail}") from error
+    if target.stat().st_size != asset["size"]:
+        raise RuntimeError(f"下载附件大小不符，已阻止上传：{asset['name']}")
+
+
+def asset_matches(actual: dict, expected: dict) -> bool:
+    return (
+        actual.get("name") == expected["name"]
+        and expected.get("size") is not None
+        and actual.get("size") == expected["size"]
+    )
+
+
+def uploaded_asset_exists(release_id: int, asset: dict) -> bool:
+    return any(asset_matches(item, asset) for item in release_assets(release_id))
 
 
 def upload_asset(release_id: int, asset: dict, path: Path) -> None:
-    url = (
-        f"{GITEE_API}/repos/{GITEE_REPO}/releases/{release_id}/attach_files"
-        f"?access_token={urllib.parse.quote(GITEE_TOKEN)}"
-    )
-    try:
-        subprocess.run(
+    url = f"{GITEE_API}/repos/{GITEE_REPO}/releases/{release_id}/attach_files"
+    for attempt in range(1, 4):
+        if uploaded_asset_exists(release_id, asset):
+            print(f"远端已存在完整附件，跳过本次上传：{asset['name']}", flush=True)
+            return
+        print(f"开始上传附件（第 {attempt}/3 次）：{asset['name']}", flush=True)
+        result = subprocess.run(
             [
                 "curl",
                 "--fail-with-body",
                 "--silent",
                 "--show-error",
-                "--retry",
-                "3",
-                "--retry-all-errors",
-                "--retry-delay",
-                "5",
                 "--http1.1",
                 "--header",
                 "Expect:",
+                "--header",
+                "Accept: application/json",
                 "--connect-timeout",
                 "30",
                 "--max-time",
                 "300",
                 "--user-agent",
                 "CitePix-release-sync",
-                "--form",
+                "--form-string",
                 f"access_token={GITEE_TOKEN}",
                 "--form",
                 f"file=@{path};filename={asset['name']}",
+                "--write-out",
+                "\n%{http_code}\t%{size_upload}\t%{speed_upload}\t%{time_total}",
                 url,
             ],
-            check=True,
+            check=False,
             capture_output=True,
             text=True,
         )
-    except subprocess.CalledProcessError as error:
-        detail = (error.stderr or error.stdout or "").strip()[-500:]
-        raise RuntimeError(f"上传附件失败：{asset['name']}，{detail}") from error
+        response_body, _, metrics = result.stdout.rpartition("\n")
+        status, sent, speed, elapsed = metrics.split("\t")
+        print(
+            f"附件传输结果：{asset['name']}，HTTP {status}，curl 退出码 {result.returncode}，"
+            f"请求体已发送 {sent} 字节，平均速度 {speed} 字节/秒，用时 {elapsed} 秒",
+            flush=True,
+        )
+        # 超时可能只发生在响应阶段，必须先核验远端，避免重复提交。
+        for poll in range(3):
+            if poll:
+                time.sleep(5)
+            if uploaded_asset_exists(release_id, asset):
+                if result.returncode:
+                    print(f"上传请求未正常返回，但远端附件已核验成功：{asset['name']}", flush=True)
+                return
+        detail = (result.stderr or response_body or "接口未返回附件，且远端核验失败").strip()[-500:]
+        detail = detail.replace(GITEE_TOKEN, "***").replace(urllib.parse.quote(GITEE_TOKEN), "***")
+        if status.startswith("4") and status not in {"408", "429"}:
+            raise RuntimeError(f"上传附件被拒绝：{asset['name']}，HTTP {status}，{detail}")
+        if attempt < 3:
+            print(f"远端尚未找到完整附件，将重试：{asset['name']}", flush=True)
+            time.sleep(5)
+    raise RuntimeError(f"上传后未能核验远端附件：{asset['name']}，{detail}")
 
 
 def sync_assets(github_release: dict, gitee_release: dict) -> None:
@@ -242,25 +276,25 @@ def sync_assets(github_release: dict, gitee_release: dict) -> None:
         pending = []
         for asset in github_release.get("assets", []):
             old = existing.get(asset["name"])
-            if old and old.get("size") == asset.get("size"):
+            if old and asset_matches(old, asset):
                 print(f"附件已存在，跳过：{asset['name']}", flush=True)
                 continue
+            path = Path(directory) / asset["name"]
+            pending.append((asset, path, old))
+
+        def sync_one(asset: dict, path: Path, old: dict | None) -> None:
+            download_asset(asset, path)
             if old:
                 delete_asset(gitee_release["id"], old["id"])
                 print(f"已删除旧附件：{asset['name']}", flush=True)
-            path = Path(directory) / asset["name"]
-            pending.append((asset, path))
-
-        def sync_one(asset: dict, path: Path) -> None:
-            download_asset(asset, path)
             upload_asset(gitee_release["id"], asset, path)
-            print(f"已上传附件：{asset['name']}", flush=True)
+            print(f"附件同步完成并已核验：{asset['name']}", flush=True)
 
         if not pending:
             return
         errors = []
         with ThreadPoolExecutor(max_workers=min(4, len(pending))) as executor:
-            futures = [executor.submit(sync_one, asset, path) for asset, path in pending]
+            futures = [executor.submit(sync_one, asset, path, old) for asset, path, old in pending]
             for future in as_completed(futures):
                 try:
                     future.result()
@@ -334,9 +368,12 @@ def main() -> None:
     if not GITEE_TOKEN:
         raise RuntimeError("环境变量 GITEE_TOKEN 为空")
     target_releases = gitee_releases()
-    event = event_release()
-    if EVENT_NAME == "release" and event and event.get("action") == "deleted":
-        tag = event["tag_name"]
+    event = github_event()
+    release = event.get("release")
+    if EVENT_NAME == "release" and not release:
+        raise RuntimeError("发布事件缺少 Release 数据，已停止同步")
+    if EVENT_NAME == "release" and event.get("action") == "deleted":
+        tag = release["tag_name"]
         current = next((release for release in target_releases if release.get("tag_name") == tag), None)
         if current:
             request_json(
@@ -351,8 +388,8 @@ def main() -> None:
             print(f"Gitee 没有对应 Release，无需删除：{tag}", flush=True)
         return
 
-    if EVENT_NAME == "release" and event:
-        release_id = event["id"]
+    if EVENT_NAME == "release" and release:
+        release_id = release["id"]
         releases = [
             request_json(
                 GITHUB_API,

@@ -1,4 +1,5 @@
 name: 同步 GitHub Releases 到 Gitee
+run-name: 同步 Gitee（${{ github.event.release.tag_name || '全部版本' }} / ${{ github.event.action || '手动' }}）
 
 on:
   release:
@@ -20,7 +21,7 @@ concurrency:
 
 jobs:
   sync:
-    if: github.repository == 'mosheng1/CitePix-feedback'
+    if: github.repository == 'mosheng1/CitePix-feedback' && (github.event_name != 'release' || !github.event.release.draft)
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
@@ -28,11 +29,14 @@ jobs:
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
       GH_TOKEN: ${{ github.token }}
       REORDER_RELEASES: ${{ inputs.reorder || false }}
+      RELEASE_TAG: ${{ github.event.release.tag_name || '' }}
+      RELEASE_ACTION: ${{ github.event.action || '' }}
 
     steps:
       - name: 检出完整标签历史
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
 
       - name: 校验 Gitee 令牌
@@ -56,11 +60,28 @@ jobs:
         run: |
           set -euo pipefail
           remote="https://oauth2:${GITEE_TOKEN}@gitee.com/${GITEE_REPO}.git"
+          push_tag() {
+            local tag="$1"
+            local reference="refs/tags/${tag}"
+            local local_object remote_object
+            local_object="$(git rev-parse "${reference}")"
+            remote_object="$(git ls-remote --refs "${remote}" "${reference}" | awk '{print $1}')"
+            if [[ -n "${remote_object}" ]]; then
+              if [[ "${remote_object}" != "${local_object}" ]]; then
+                echo "Gitee 标签指向不同对象，已停止同步：${tag}" >&2
+                return 1
+              fi
+              echo "Gitee 已存在相同标签，跳过：${tag}"
+              return 0
+            fi
+            git push --quiet "${remote}" "${reference}:${reference}"
+          }
           if [[ "${GITHUB_EVENT_NAME}" == 'workflow_dispatch' ]]; then
-            git push --quiet "${remote}" --tags
-          elif [[ "${GITHUB_EVENT_NAME}" != 'release' || "${{ github.event.action }}" != 'deleted' ]]; then
-            git push --quiet "${remote}" \
-              "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+            while IFS= read -r tag; do
+              push_tag "${tag}"
+            done < <(git tag --list 'v*')
+          elif [[ "${RELEASE_ACTION}" != 'deleted' ]]; then
+            push_tag "${RELEASE_TAG}"
           fi
 
       - name: 同步发布说明和附件
