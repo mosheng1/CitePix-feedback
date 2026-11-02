@@ -5,12 +5,6 @@ on:
   release:
     types: [published, edited, deleted]
   workflow_dispatch:
-    inputs:
-      reorder:
-        description: '重建 Gitee Releases 顺序；会删除并重新创建所有 Gitee Release'
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: read
@@ -28,7 +22,6 @@ jobs:
       GITEE_REPO: mk-mo-sheng/CitePix-feedback
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
       GH_TOKEN: ${{ github.token }}
-      REORDER_RELEASES: ${{ inputs.reorder || false }}
       RELEASE_TAG: ${{ github.event.release.tag_name || '' }}
       RELEASE_ACTION: ${{ github.event.action || '' }}
 
@@ -84,6 +77,6 @@ jobs:
             push_tag "${RELEASE_TAG}"
           fi
 
-      - name: 同步发布说明和附件
+      - name: 同步发布信息（附件由人工上传）
         shell: bash
         run: python3 .github/scripts/sync-gitee-releases.py
