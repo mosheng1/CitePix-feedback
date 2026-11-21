@@ -24,13 +24,14 @@ concurrency:
 jobs:
   build-and-upload:
     if: github.repository == 'mosheng1/CitePix-feedback'
-    runs-on: windows-latest
+    runs-on: windows-2025-vs2026
     timeout-minutes: 180
     permissions:
       contents: write
     env:
       SOURCE_REF: ${{ inputs.source_ref }}
       MANUAL_TAG: ${{ inputs.tag || '' }}
+      RUSTUP_TOOLCHAIN: '1.99.1'
       CARGO_TERM_COLOR: never
       CARGO_PROFILE_RELEASE_LTO: fat
       CARGO_PROFILE_RELEASE_OPT_LEVEL: '3'
@@ -147,96 +148,124 @@ jobs:
             throw '无法确定发布版本，或发布标签与源码版本不一致；原始输出已隐藏。'
           }
 
-      - name: 安装 Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: 安装固定版本 Rust
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca
         with:
-          toolchain: stable-x86_64-pc-windows-msvc
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
 
-      - name: 初始化 MSVC 构建环境
-        uses: ilammy/msvc-dev-cmd@v1
+      - name: 初始化固定 MSVC 和 SDK
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756
         with:
           arch: x64
+          toolset: '14.44'
+          sdk: '10.0.26100.0'
 
-      - name: 配置 CMake 和 Windows 构建工具
+      - name: 安装并校验固定构建工具
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
-          $cmake = Join-Path $env:ProgramFiles 'CMake\bin\cmake.exe'
-          if (-not (Test-Path -LiteralPath $cmake)) { throw '未找到 CMake。' }
-          "CMAKE=$cmake" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) { throw '未找到 MSVC 编译器。' }
-          $msvcLink = @(Get-Command link.exe -All -ErrorAction SilentlyContinue) |
-            Where-Object { $_.Path -match '(?i)\\VC\\Tools\\MSVC\\[^\\]+\\bin\\Hostx64\\x64\\link\.exe$' } |
-            Select-Object -First 1
-          if ($null -eq $msvcLink) { throw '未找到 MSVC x64 链接器。' }
-          # FFmpeg 准备工具可能调整 PATH，Cargo 必须始终使用 MSVC 链接器。
-          "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$($msvcLink.Path)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $msvcBin = Join-Path $env:VCToolsInstallDir 'bin\Hostx64\x64'
+          $cmakeBin = Join-Path $env:ProgramFiles 'CMake\bin'
+          $llvmBin = Join-Path $env:ProgramFiles 'LLVM\bin'
+          $innoBin = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6'
+          $inno64Bin = Join-Path $env:ProgramFiles 'Inno Setup 6'
+          $chocoBin = Join-Path $env:ChocolateyInstall 'bin'
+          $env:PATH = (@($msvcBin, $cmakeBin, $llvmBin, $innoBin, $inno64Bin, $chocoBin) + @($env:PATH -split ';')) -join ';'
+          foreach ($directory in @($chocoBin, $inno64Bin, $innoBin, $llvmBin, $cmakeBin, $msvcBin)) {
+            $directory | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+          $packages = @(
+            @{ Name = 'cmake'; Version = '4.4.5'; Command = 'cmake.exe'; Args = @('--version'); Pattern = '^cmake version 4\.4\.5\b' },
+            @{ Name = 'llvm'; Version = '20.1.8'; Command = 'clang.exe'; Args = @('--version'); Pattern = 'clang version 20\.1\.8\b' },
+            @{ Name = 'ninja'; Version = '1.13.2'; Command = 'ninja.exe'; Args = @('--version'); Pattern = '^1\.13\.2\s*$' },
+            @{ Name = 'innosetup'; Version = '6.7.1'; Command = 'ISCC.exe'; Pattern = '^6\.7\.1(?:\.0)?$' },
+            @{ Name = 'make'; Version = '4.4.1'; Command = 'make.exe'; Args = @('--version'); Pattern = '^GNU Make 4\.4\.1\b' },
+            @{ Name = 'nasm'; Version = '2.16.3'; Command = 'nasm.exe'; Args = @('-v'); Pattern = '^NASM version 2\.16\.03\b' },
+            @{ Name = 'pkgconfiglite'; Version = '0.28.0'; Command = 'pkg-config.exe'; Args = @('--version'); Pattern = '^0\.28(?:\.0)?\s*$' }
+          )
+          function Get-ToolVersion($Package) {
+            $command = Get-Command $Package.Command -ErrorAction SilentlyContinue
+            if ($null -eq $command) { return '' }
+            if ($Package.Command -eq 'ISCC.exe') {
+              return [Diagnostics.FileVersionInfo]::GetVersionInfo($command.Source).ProductVersion
+            }
+            $versionArgs = $Package.Args
+            $version = (& $command.Source @versionArgs 2>$null | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0) { return '' }
+            return $version
+          }
+          foreach ($package in $packages) {
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
+              if ((Get-ToolVersion $package) -match $package.Pattern) { break }
+              Write-Host "安装固定构建工具：$($package.Name) $($package.Version)（第 $attempt/3 次）。"
+              choco upgrade $package.Name --version $package.Version --allow-downgrade --no-progress --yes
+              if ($LASTEXITCODE -notin @(0, 3010)) {
+                if ($attempt -eq 3) { throw "安装固定构建工具失败：$($package.Name)" }
+                Start-Sleep -Seconds 10
+              }
+              # 保留选定的 MSVC 优先级，只追加安装器新增的目录。
+              foreach ($scope in @('Machine', 'User')) {
+                foreach ($directory in ([Environment]::GetEnvironmentVariable('Path', $scope) -split ';')) {
+                  if (-not [string]::IsNullOrWhiteSpace($directory) -and ($env:PATH -split ';') -notcontains $directory) {
+                    $env:PATH += ";$directory"
+                    $directory | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+                  }
+                }
+              }
+            }
+            if ((Get-ToolVersion $package) -notmatch $package.Pattern) {
+              throw "构建工具版本校验失败：$($package.Name)，需要 $($package.Version)。"
+            }
+            Write-Host "构建工具版本已确认：$($package.Name) $($package.Version)"
+          }
+          $msvcLink = Join-Path $msvcBin 'link.exe'
+          if (-not (Test-Path -LiteralPath $msvcLink -PathType Leaf)) { throw '未找到选定的 MSVC 链接器。' }
+          "CMAKE=$((Get-Command cmake.exe).Source)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "LIBCLANG_PATH=$llvmBin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$msvcLink" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           foreach ($setting in @('CC=cl.exe', 'CXX=cl.exe', 'CMAKE_C_COMPILER=cl.exe', 'CMAKE_CXX_COMPILER=cl.exe')) {
             $setting | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           }
-          $isccCandidates = @(
-            (Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'),
-            (Join-Path $env:ProgramFiles 'Inno Setup 6\ISCC.exe')
-          )
-          if (-not ($isccCandidates | Where-Object { Test-Path -LiteralPath $_ })) {
-            choco install innosetup --no-progress --yes
-            if ($LASTEXITCODE -ne 0) { throw '安装 Inno Setup 失败。' }
-          }
-          if (-not (Get-Command clang.exe -ErrorAction SilentlyContinue)) {
-            choco install llvm --no-progress --yes
-            if ($LASTEXITCODE -ne 0) { throw '安装 LLVM 失败。' }
-          }
-          $llvmBin = Join-Path $env:ProgramFiles 'LLVM\bin'
-          if (Test-Path -LiteralPath (Join-Path $llvmBin 'clang.exe')) {
-            $llvmBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          }
-          $packages = @{ 'make.exe' = 'make'; 'nasm.exe' = 'nasm'; 'pkg-config.exe' = 'pkgconfiglite' }
-          foreach ($tool in $packages.Keys) {
-            if (Get-Command $tool -ErrorAction SilentlyContinue) { continue }
-            for ($attempt = 1; $attempt -le 3; $attempt++) {
-              Write-Host "安装构建工具：$tool（包：$($packages[$tool])，第 $attempt/3 次）。"
-              choco install $packages[$tool] --no-progress --yes
-              $installExitCode = $LASTEXITCODE
-              # 保留 MSVC 的 PATH 优先级，并让新安装目录在当前及后续步骤中生效。
-              $installedPaths = @(
-                [Environment]::GetEnvironmentVariable('Path', 'Machine'),
-                [Environment]::GetEnvironmentVariable('Path', 'User')
-              )
-              foreach ($directory in (($installedPaths -join ';') -split ';')) {
-                if (-not [string]::IsNullOrWhiteSpace($directory) -and ($env:PATH -split ';') -notcontains $directory) {
-                  $env:PATH += ";$directory"
-                  $directory | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-                }
-              }
-              $toolCommand = Get-Command $tool -ErrorAction SilentlyContinue
-              if ($installExitCode -eq 0 -and $null -ne $toolCommand) {
-                Write-Host "已确认构建工具可用：$tool"
-                break
-              }
-              if ($attempt -eq 3) {
-                throw "安装构建工具失败：$tool（包：$($packages[$tool])）；已尝试 3 次，最后退出码：$installExitCode，未能确认工具可用。"
-              }
-              Write-Host "构建工具安装或校验未通过：$tool，退出码：$installExitCode；10 秒后重试。"
-              Start-Sleep -Seconds 10
-            }
-          }
 
-      - name: 配置 bindgen 的 MSVC 头文件路径
+      - name: 使用选定工具链的 bindgen 头文件
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-          if (-not (Test-Path -LiteralPath $vswhere)) { throw '未找到 vswhere.exe。' }
-          $msvcInclude = @(& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'VC\Tools\MSVC\*\include' | Select-Object -Last 1)[0]
-          $kitsRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\Include'
-          $sdkVersion = Get-ChildItem -LiteralPath $kitsRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1
-          if ($null -eq $msvcInclude -or $null -eq $sdkVersion) { throw '未找到 MSVC 或 Windows SDK 头文件。' }
-          $sdkInclude = Join-Path $kitsRoot $sdkVersion.Name
+          $msvcInclude = Join-Path $env:VCToolsInstallDir 'include'
+          $sdkInclude = Join-Path $env:WindowsSdkDir "Include\$($env:WindowsSDKVersion.TrimEnd('\'))"
           $includePaths = @($msvcInclude, (Join-Path $sdkInclude 'ucrt'), (Join-Path $sdkInclude 'shared'), (Join-Path $sdkInclude 'um'))
-          if ($includePaths | Where-Object { -not (Test-Path -LiteralPath $_) }) { throw 'MSVC 或 Windows SDK 头文件目录不完整。' }
+          if ($includePaths | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Container) }) {
+            throw '选定的 MSVC 或 Windows SDK 头文件目录不完整。'
+          }
           $clangArgs = ($includePaths | ForEach-Object { '-I"{0}"' -f $_ }) -join ' '
           "BINDGEN_EXTRA_CLANG_ARGS_x86_64_pc_windows_msvc=$clangArgs" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: 预检 PowerShell 解压环境
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $probeRoot = Join-Path $env:RUNNER_TEMP 'citepix-archive-probe'
+          New-Item -ItemType Directory -Path $probeRoot -Force | Out-Null
+          $archive = Join-Path $probeRoot 'probe.zip'
+          $zip = [IO.Compression.ZipFile]::Open($archive, [IO.Compression.ZipArchiveMode]::Create)
+          try { [void]$zip.CreateEntry('probe.txt') } finally { $zip.Dispose() }
+          $start = [Diagnostics.ProcessStartInfo]::new('powershell.exe')
+          $start.UseShellExecute = $false
+          $command = '$ErrorActionPreference = ''Stop''; Expand-Archive -LiteralPath ''{0}'' -DestinationPath ''{1}'' -Force' -f $archive, (Join-Path $probeRoot 'output')
+          foreach ($argument in @('-NoProfile', '-NonInteractive', '-Command', $command)) {
+            [void]$start.ArgumentList.Add($argument)
+          }
+          # 与 OCR 构建脚本一致，避免 Windows PowerShell 继承 PowerShell 7 的模块路径。
+          [void]$start.Environment.Remove('PSModulePath')
+          $process = [Diagnostics.Process]::Start($start)
+          try {
+            $process.WaitForExit()
+            if ($process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $probeRoot 'output\probe.txt'))) {
+              throw 'Windows PowerShell 解压预检失败。'
+            }
+          } finally { $process.Dispose() }
+          Write-Host 'Windows PowerShell 解压环境预检通过。'
 
       # 原始日志只保存在临时目录；失败时仅输出固定阶段、错误分类和错误码。
       - name: 静默生成 Windows 安装版和便携版
@@ -324,7 +353,7 @@ jobs:
 
       - name: 上传加密失败诊断
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: build-diagnostics-${{ github.run_id }}
           path: ${{ runner.temp }}/citepix-diagnostics.aes
@@ -406,7 +435,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           try {
             $tempRoot = [IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\') + '\'
-            foreach ($path in @((Join-Path $env:RUNNER_TEMP 'citepix-private'), (Join-Path $env:RUNNER_TEMP 'citepix-access.log'), (Join-Path $env:RUNNER_TEMP 'citepix-ffmpeg.log'), (Join-Path $env:RUNNER_TEMP 'citepix-installer.log'), (Join-Path $env:RUNNER_TEMP 'citepix-diagnostics.aes'))) {
+            foreach ($path in @((Join-Path $env:RUNNER_TEMP 'citepix-private'), (Join-Path $env:RUNNER_TEMP 'citepix-access.log'), (Join-Path $env:RUNNER_TEMP 'citepix-archive-probe'), (Join-Path $env:RUNNER_TEMP 'citepix-ffmpeg.log'), (Join-Path $env:RUNNER_TEMP 'citepix-installer.log'), (Join-Path $env:RUNNER_TEMP 'citepix-diagnostics.aes'))) {
               $resolved = [IO.Path]::GetFullPath($path)
               if (-not $resolved.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase)) { throw '清理路径超出临时目录' }
               if (Test-Path -LiteralPath $resolved) { Remove-Item -LiteralPath $resolved -Recurse -Force }
