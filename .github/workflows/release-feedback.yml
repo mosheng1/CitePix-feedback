@@ -188,11 +188,21 @@ jobs:
             $command = Get-Command $Package.Command -ErrorAction SilentlyContinue
             if ($null -eq $command) { return '' }
             if ($Package.Command -eq 'ISCC.exe') {
-              return [Diagnostics.FileVersionInfo]::GetVersionInfo($command.Source).ProductVersion
+              # 文件资源版本不能代表编译引擎版本，用无产物脚本读取实际引擎信息。
+              $probe = Join-Path $env:RUNNER_TEMP 'citepix-inno-version.iss'
+              [IO.File]::WriteAllLines($probe, @(
+                '[Setup]', 'AppName=CitePix 构建校验', 'AppVersion=1',
+                'DefaultDirName={tmp}\CitePixBuildProbe', 'Output=no', 'Uninstallable=no'
+              ), [Text.UTF8Encoding]::new($true))
+              $versionArgs = @($probe)
+            } else {
+              $versionArgs = $Package.Args
             }
-            $versionArgs = $Package.Args
             $version = (& $command.Source @versionArgs 2>$null | Out-String).Trim()
             if ($LASTEXITCODE -ne 0) { return '' }
+            if ($Package.Command -eq 'ISCC.exe') {
+              return [regex]::Match($version, '(?m)^Compiler engine version: [^\r\n]*?(\d+\.\d+\.\d+)\b').Groups[1].Value
+            }
             return $version
           }
           foreach ($package in $packages) {
@@ -435,7 +445,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           try {
             $tempRoot = [IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\') + '\'
-            foreach ($path in @((Join-Path $env:RUNNER_TEMP 'citepix-private'), (Join-Path $env:RUNNER_TEMP 'citepix-access.log'), (Join-Path $env:RUNNER_TEMP 'citepix-archive-probe'), (Join-Path $env:RUNNER_TEMP 'citepix-ffmpeg.log'), (Join-Path $env:RUNNER_TEMP 'citepix-installer.log'), (Join-Path $env:RUNNER_TEMP 'citepix-diagnostics.aes'))) {
+            foreach ($path in @((Join-Path $env:RUNNER_TEMP 'citepix-private'), (Join-Path $env:RUNNER_TEMP 'citepix-access.log'), (Join-Path $env:RUNNER_TEMP 'citepix-archive-probe'), (Join-Path $env:RUNNER_TEMP 'citepix-inno-version.iss'), (Join-Path $env:RUNNER_TEMP 'citepix-ffmpeg.log'), (Join-Path $env:RUNNER_TEMP 'citepix-installer.log'), (Join-Path $env:RUNNER_TEMP 'citepix-diagnostics.aes'))) {
               $resolved = [IO.Path]::GetFullPath($path)
               if (-not $resolved.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase)) { throw '清理路径超出临时目录' }
               if (Test-Path -LiteralPath $resolved) { Remove-Item -LiteralPath $resolved -Recurse -Force }
