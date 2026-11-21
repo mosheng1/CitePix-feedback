@@ -185,6 +185,18 @@ jobs:
             @{ Name = 'pkgconfiglite'; Version = '0.28.0'; Command = 'pkg-config.exe'; Args = @('--version'); Pattern = '^0\.28(?:\.0)?\s*$' }
           )
           function Get-ToolVersion($Package) {
+            if ($Package.Command -eq 'nasm.exe') {
+              # NASM 安装器记录安装目录，但不会把它加入系统 PATH。
+              $registry = Get-Item -LiteralPath 'HKCU:\Software\NASM' -ErrorAction SilentlyContinue
+              if ($null -ne $registry) {
+                $directory = [string]$registry.GetValue('')
+                if (-not [string]::IsNullOrWhiteSpace($directory) -and
+                    (Test-Path -LiteralPath (Join-Path $directory 'nasm.exe') -PathType Leaf)) {
+                  $env:PATH = "$directory;$env:PATH"
+                  $directory | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+                }
+              }
+            }
             $command = Get-Command $Package.Command -ErrorAction SilentlyContinue
             if ($null -eq $command) { return '' }
             if ($Package.Command -eq 'ISCC.exe') {
@@ -224,8 +236,10 @@ jobs:
                 }
               }
             }
-            if ((Get-ToolVersion $package) -notmatch $package.Pattern) {
-              throw "构建工具版本校验失败：$($package.Name)，需要 $($package.Version)。"
+            $actualVersion = Get-ToolVersion $package
+            if ($actualVersion -notmatch $package.Pattern) {
+              $actualCommand = (Get-Command $package.Command -ErrorAction SilentlyContinue).Source
+              throw "构建工具版本校验失败：$($package.Name)，需要 $($package.Version)，实际版本：$actualVersion，命令：$actualCommand。"
             }
             Write-Host "构建工具版本已确认：$($package.Name) $($package.Version)"
           }
